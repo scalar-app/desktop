@@ -1,0 +1,33 @@
+[package]
+name = "scalar-desktop"
+version = "0.1.0"
+description = "Scalar for macOS, Windows, Linux, iOS and Android"
+license = "AGPL-3.0-only"
+edition = "2021"
+rust-version = "1.77.2"
+
+# The mobile targets build this as a library; the desktop targets build the binary that calls into
+# it. Both share every line of logic below.
+[lib]
+name = "scalar_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `cookies` is the reason this crate exists: a webview will not send a session cookie to a
+# different origin, so the session is kept here instead.
+reqwest = { version = "0.12", default-features = false, features = [
+  "cookies",
+  "json",
+  "rustls-tls",
+] }
+tokio = { version = "1", features = ["sync"] }
+
+[features]
+# Used by `tauri dev` to enable devtools on a release build.
+custom-protocol = ["tauri/custom-protocol"]
