@@ -21,6 +21,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      # Tauri reads frontendDist while compiling, so the macro needs the folder to exist. These
+      # checks are about the Rust, not the interface, so a placeholder is enough and keeps this
+      # job from repeating the web build the matrix below already does.
+      - name: Stand in for the bundled interface
+        run: |
+          mkdir -p dist
+          echo '<!doctype html><title>placeholder</title>' > dist/index.html
       - run: cargo fmt --all --check
         working-directory: src-tauri
       - run: cargo clippy --all-targets -- -D warnings
