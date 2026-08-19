@@ -108,9 +108,28 @@ Builds are unsigned. macOS will say the developer cannot be verified, and Window
 
 ## Status
 
-Verified on Windows: the app builds and runs, the menu is attached, window geometry survives a restart, and a second launch focuses the existing window instead of opening another. `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean, and CI builds on Linux, macOS and Windows.
+Verified on Windows, with the MSVC toolchain and the full `crate-type` including `staticlib` and `cdylib`:
 
-Not verified: the unit tests could not be run on this machine, because the mingw toolchain cannot link the test harness against WebView2; CI runs them on Linux. Opening an external link in the system browser is covered by unit tests on the rule that decides it, but was not exercised by clicking one, because the interface has no outbound link on its first screen. Binary responses are handled as bytes end to end but no binary endpoint exists to try yet. Nothing has been built or run on macOS, iOS or Android.
+- `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings` both pass.
+- `cargo test` passes: four tests covering the navigation rule, including lookalike hosts such as `tauri.localhost.example.com`, and that a server which is not listening fails immediately rather than leaving a request outstanding.
+- `pnpm build` produces both installers: `Scalar_0.1.0_x64_en-US.msi` and `Scalar_0.1.0_x64-setup.exe`.
+- The release binary runs. Its menus were read back from the running window: Edit carries Undo, Redo, Cut, Copy, Paste and Select All with the conventional shortcuts, and View carries Zoom In, Zoom Out and Actual Size.
+- Window geometry survives a restart: resized and moved, closed with a real close message, reopened at the same size and position.
+- A second launch focuses the existing window rather than starting another copy.
+
+Not verified, and worth stating plainly rather than implying otherwise:
+
+- **Nothing has been built or run on macOS**, so the universal `.dmg` path in the release workflow, the macOS application menu and its shortcuts are all untested. macOS cannot be tested from this machine.
+- **Clicking an external link was not exercised by hand.** Windows refuses to let a background process take the foreground, so synthetic clicks could not be driven into the window reliably. The rule that decides internal from external is covered by unit tests, and Settings now carries real outbound links to click, but nobody has yet watched one open in a browser.
+- **Copy and paste were not exercised by keystroke**, for the same reason. The menu items and their accelerators are confirmed to exist; that they act was not observed.
+- **The 30 second request timeout was not exercised.** The refused connection case is tested and fails immediately. A server that accepts and then never answers was not simulated.
+- The mobile targets are configured and share this crate, but have never been built or run.
+
+## Releases
+
+Pushing a tag such as `v0.1.0` builds a universal `.dmg` for macOS and an installer for Windows and attaches them to a **draft** release, so nothing becomes public until somebody reads it and presses publish. The Windows installer is configured to fetch WebView2 when the machine does not already have it.
+
+Builds are unsigned. macOS will say the developer cannot be verified, and Windows SmartScreen will warn for the same reason. Signing certificates cost money and this project does not spend any; if that changes it will be because somebody with a certificate volunteered it.
 
 ## Licence
 

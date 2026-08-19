@@ -202,8 +202,11 @@ fn is_internal(url: &tauri::Url) -> bool {
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
+    // Equal rather than Plus: the plus character needs Shift on most layouts, and Tauri does not
+    // parse "Plus" as a key at all, which silently left Zoom In with no shortcut. Ctrl+= is what
+    // browsers bind, and it is reached without a modifier dance.
     let zoom_in = MenuItemBuilder::with_id("zoom-in", "Zoom In")
-        .accelerator("CmdOrCtrl+Plus")
+        .accelerator("CmdOrCtrl+=")
         .build(app)?;
     let zoom_out = MenuItemBuilder::with_id("zoom-out", "Zoom Out")
         .accelerator("CmdOrCtrl+-")
@@ -363,7 +366,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::is_internal;
+    use super::{build_client, is_internal, CONNECT_TIMEOUT};
     use tauri::Url;
 
     fn url(text: &str) -> Url {
@@ -391,5 +394,26 @@ mod tests {
         assert!(!is_internal(&url("https://tauri.localhost.example.com/")));
         assert!(!is_internal(&url("https://notlocalhost/")));
         assert!(!is_internal(&url("https://evil.com/?x=tauri.localhost")));
+    }
+
+    /// A server that is not there has to fail, and fail quickly, rather than leaving the
+    /// request outstanding with nothing on screen to explain it. The error is what the command
+    /// turns into a string, which the shim rethrows so the web app shows its usual failure.
+    #[tokio::test]
+    async fn a_server_that_is_not_there_fails_rather_than_hanging() {
+        let client = build_client().expect("client should build");
+
+        let started = std::time::Instant::now();
+        // Port 1 on loopback: nothing listens there, so the connection is refused outright.
+        let result = client.get("http://127.0.0.1:1/health").send().await;
+
+        assert!(
+            result.is_err(),
+            "a refused connection must surface as an error"
+        );
+        assert!(
+            started.elapsed() < CONNECT_TIMEOUT,
+            "a refused connection should fail immediately, not wait out the connect timeout",
+        );
     }
 }

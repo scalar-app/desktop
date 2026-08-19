@@ -35,6 +35,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 
+# Only for the tests: the crate itself is driven by Tauri's runtime.
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
 [features]
 # Used by `tauri dev` to enable devtools on a release build.
 custom-protocol = ["tauri/custom-protocol"]
