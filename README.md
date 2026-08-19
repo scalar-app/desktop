@@ -27,7 +27,14 @@ Scalar is self-hosted and there is no hosted service, so a packaged app has no d
 - Node 24 and pnpm 11
 - Rust stable
 - Platform toolchain:
-  - **Windows**: Microsoft C++ Build Tools and WebView2. The MSVC toolchain is required; the GNU toolchain fails to link at the size Tauri reaches (`export ordinal too large`).
+  - **Windows**: Microsoft C++ Build Tools and WebView2. Use the MSVC toolchain.
+
+    The GNU toolchain fails to link with `export ordinal too large`, because mingw's `ld` cannot
+    export the number of symbols a `cdylib` of this size produces. That crate type exists only for
+    Android, so if MSVC is genuinely not an option, a desktop only build links after temporarily
+    reducing `[lib] crate-type` in `src-tauri/Cargo.toml` to `["rlib"]`. Do not commit that: iOS
+    needs `staticlib` and Android needs `cdylib`, and CI builds both.
+
   - **macOS**: Xcode command line tools
   - **Linux**: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`
 - Sibling checkouts of [`web`](https://github.com/scalar-app/web), [`ui`](https://github.com/scalar-app/ui) and [`sdk`](https://github.com/scalar-app/sdk), the same arrangement the `link:` dependencies use elsewhere. Set `SCALAR_WEB_DIR` if `web` is somewhere else.
