@@ -113,6 +113,11 @@ async fn api_fetch(
 
 /// Runs before any page script, so the app finds its transport already in place.
 ///
+/// Note what this does not do: it does not make remote images render. The content security
+/// policy keeps `img-src` to `'self' data:` on purpose, because a remote image in an email is
+/// usually a tracking pixel. Carrying image bytes correctly and choosing to display them are
+/// separate decisions, and only the first one belongs here. See the README.
+///
 /// It defines the hook `lib/api.ts` looks for. The web app stays unaware that it is running in a
 /// native shell: it asks for a fetch and gets one.
 ///
@@ -142,14 +147,24 @@ const BOOTSTRAP: &str = r#"
       headers[key] = value;
     });
 
-    const result = await invoke('api_fetch', {
-      request: {
-        url,
-        method: (init.method || 'GET').toUpperCase(),
-        headers,
-        body: await toBytes(init.body),
-      },
-    });
+    let result;
+    try {
+      result = await invoke('api_fetch', {
+        request: {
+          url,
+          method: (init.method || 'GET').toUpperCase(),
+          headers,
+          body: await toBytes(init.body),
+        },
+      });
+    } catch (reason) {
+      // Tauri rejects a failed command with a plain string. The SDK keeps the message only when
+      // the cause is an Error, so without this every transport failure reads as a generic
+      // "network request failed" and the real reason, such as a timeout or a refused
+      // connection, is thrown away. TypeError is what fetch itself throws when a request never
+      // completes, so the web app handles this exactly as it handles a browser failure.
+      throw new TypeError(typeof reason === 'string' ? reason : 'Network request failed');
+    }
 
     const bytes = new Uint8Array(result.body);
     // 204 and 304 must be constructed with a null body or the Response constructor throws.

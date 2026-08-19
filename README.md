@@ -25,6 +25,23 @@ The rest is what a window needs to be an application rather than a page:
 - **The window is remembered.** Size and position are restored, rather than reopening at the same default size every launch.
 - **One instance.** Launching again focuses the window you already have instead of opening a second copy on the same session.
 
+## Remote content, and why the CSP stays narrow
+
+The content security policy in `tauri.conf.json` sets `img-src 'self' data:`. Remote images do not load, and that is the intended behaviour rather than an oversight to fix later.
+
+Scalar is built around email, and a remote image in an email is usually a tracking pixel. Loading one tells the sender that the message was opened, when, from which IP address, and with which client. Every mail client that takes its readers seriously blocks remote content by default and asks first, so widening `img-src` to allow arbitrary origins would quietly turn the desktop app into the least private way to read your mail.
+
+Making the transport binary safe does not change this. `api_fetch` can now carry image bytes correctly, but the webview still refuses to render an `<img>` pointing at a remote origin, which is the layer doing the protecting.
+
+When loading remote images becomes a feature, it should work like this, and none of it needs the CSP to allow remote origins:
+
+1. The reader asks for images in a particular message, per sender or per message. It is never automatic.
+2. The image is fetched through `api_fetch`, in Rust, so the request carries no cookies from the webview and can be logged, refused or routed.
+3. The bytes are handed back and turned into a `blob:` URL, which the interface renders.
+4. `blob:` is added to `img-src` at that point, and nothing else. A `blob:` URL refers to content this app already fetched and holds, not to a remote origin, so it does not reintroduce the leak.
+
+That work belongs in the `web` repository, since it is interface behaviour. The only change here would be the single `blob:` addition, made when there is something to render rather than in advance.
+
 ## Which server it talks to
 
 Scalar is self-hosted and there is no hosted service, so a packaged app has no default server to point at. On first run it asks for the address of the Scalar API you are running, remembers it, and gets on with it. That screen lives in the web app (`ServerSetup`), so it is the same on every platform, including a browser build that was put up without a baked in API URL.
