@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The permissions the main window needs. Deliberately small: the interface is a web app that talks to a Scalar server over api_fetch, so it needs no filesystem, shell or process access.",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:default"]
+}

@@ -12,11 +12,18 @@ Tauri 2 is the reason one repository can cover all five targets. The Rust core h
 
 ## What the native part actually does
 
-Almost nothing, deliberately. There is one job it exists for.
+Little, deliberately. One job it exists for, and a handful of things a webview does not provide.
 
 A packaged app is served from `tauri://localhost`, so every call to a Scalar server is cross origin. The session cookie is `HttpOnly` and `SameSite=Lax`, which means a webview will not send it, and the API's CORS allowlist would not name that origin in any case. The alternatives were to weaken the cookie to `SameSite=None` or to widen CORS on every self-hosted server, both of which make the browser deployment less safe to fix something that is not the browser's problem.
 
-Instead, requests are made from Rust, where an ordinary HTTP client with its own cookie jar applies. `src-tauri/src/lib.rs` exposes a single `api_fetch` command and injects a `window.__SCALAR_FETCH__` shim before the app boots. The web app asks the SDK for a custom fetch, which it already supports, and never learns it is running natively. **The API is unchanged.**
+Instead, requests are made from Rust, where an ordinary HTTP client with its own cookie jar applies. `src-tauri/src/lib.rs` exposes a single `api_fetch` command and injects a `window.__SCALAR_FETCH__` shim before the app boots. The web app asks the SDK for a custom fetch, which it already supports, and never learns it is running natively. **The API is unchanged.** Bodies cross that boundary as bytes in both directions, so an attachment or an avatar is not corrupted by being decoded as text, and the client has connect and request timeouts so an unresponsive server fails instead of hanging.
+
+The rest is what a window needs to be an application rather than a page:
+
+- **Links leave the app properly.** Anything that is not the bundled interface opens in the reader's own browser. Following it in this window would replace the app with a web page and leave no way back, because there is no address bar and no back button.
+- **A menu.** A webview has no editing commands of its own, and on macOS that means copy, paste and select all genuinely do nothing without an Edit menu carrying the standard roles. Zoom in, out and actual size are there for the same reason.
+- **The window is remembered.** Size and position are restored, rather than reopening at the same default size every launch.
+- **One instance.** Launching again focuses the window you already have instead of opening a second copy on the same session.
 
 ## Which server it talks to
 
@@ -65,18 +72,28 @@ These generate `gen/apple` and `gen/android`, which are ignored here: they are d
 ## Layout
 
 ```
-scripts/build-web.mjs   builds scalar-app/web as static files and copies them into dist/
-dist/                   the bundled interface (generated, ignored)
-src-tauri/src/lib.rs    api_fetch and the bootstrap script; everything the app does
-src-tauri/src/main.rs   the desktop binary, which only calls into the library
+scripts/build-web.mjs        builds scalar-app/web as static files and copies them into dist/
+dist/                        the bundled interface (generated, ignored)
+src-tauri/src/lib.rs         everything the app does: api_fetch, the bootstrap script, the
+                             menu, navigation handling and window setup
+src-tauri/src/main.rs        the desktop binary, which only calls into the library
+src-tauri/capabilities/      the permissions the window is granted, kept as small as it can be
 src-tauri/tauri.conf.json
 ```
 
 Keeping the behaviour in the library rather than the binary is what stops the desktop and mobile builds from drifting apart: mobile links the library directly.
 
+## Releases
+
+Pushing a tag such as `v0.1.0` builds a universal `.dmg` for macOS and an installer for Windows and attaches them to a **draft** release, so nothing becomes public until somebody reads it and presses publish. The Windows installer is configured to fetch WebView2 when the machine does not already have it.
+
+Builds are unsigned. macOS will say the developer cannot be verified, and Windows SmartScreen will warn for the same reason. Signing certificates cost money and this project does not spend any; if that changes it will be because somebody with a certificate volunteered it.
+
 ## Status
 
-Desktop is built in CI on Linux, macOS and Windows. There are no packaged releases yet, and the app is not signed or notarized, so macOS and Windows will warn about an unidentified developer. Signing costs money and this project does not spend any; if that changes it will be because somebody with a certificate volunteered it.
+Verified on Windows: the app builds and runs, the menu is attached, window geometry survives a restart, and a second launch focuses the existing window instead of opening another. `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean, and CI builds on Linux, macOS and Windows.
+
+Not verified: the unit tests could not be run on this machine, because the mingw toolchain cannot link the test harness against WebView2; CI runs them on Linux. Opening an external link in the system browser is covered by unit tests on the rule that decides it, but was not exercised by clicking one, because the interface has no outbound link on its first screen. Binary responses are handled as bytes end to end but no binary endpoint exists to try yet. Nothing has been built or run on macOS, iOS or Android.
 
 ## Licence
 

@@ -1,0 +1,96 @@
+name: Release
+
+# Tagging is the trigger, so a release is a deliberate act rather than something every push does.
+# The result is a draft: nothing is public until somebody reads it and presses publish.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build, for example v0.1.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One macOS job producing a universal binary, so a single .dmg covers both Apple
+          # silicon and Intel rather than asking people which machine they have.
+          - os: macos-latest
+            label: macOS (universal)
+            target: universal-apple-darwin
+            args: --target universal-apple-darwin
+          - os: windows-latest
+            label: Windows
+            target: x86_64-pc-windows-msvc
+            args: ''
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: desktop
+      - uses: actions/checkout@v4
+        with:
+          repository: scalar-app/web
+          path: web
+      - uses: actions/checkout@v4
+        with:
+          repository: scalar-app/ui
+          path: ui
+      - uses: actions/checkout@v4
+        with:
+          repository: scalar-app/sdk
+          path: sdk
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Build linked packages
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          pnpm --dir ui build
+          pnpm --dir sdk install --frozen-lockfile
+          pnpm --dir sdk build
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: desktop
+
+      # Unsigned on purpose. Signing certificates cost money and this project has none, so both
+      # platforms will warn that the developer is unidentified. See the README.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: Scalar ${{ github.event.inputs.tag || github.ref_name }}
+          releaseDraft: true
+          prerelease: true
+          releaseBody: |
+            Unsigned builds. macOS will say the developer cannot be verified: open the app from
+            the Finder context menu the first time. Windows SmartScreen will warn for the same
+            reason.
+
+            Scalar is self-hosted. On first run the app asks for the address of the Scalar API
+            you are running.
+          args: ${{ matrix.args }}

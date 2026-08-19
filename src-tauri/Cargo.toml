@@ -27,7 +27,22 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
 ] }
 tokio = { version = "1", features = ["sync"] }
+# Opens off-origin links in the reader's own browser rather than navigating the app away.
+tauri-plugin-opener = "2"
+
+# Desktop only. A phone has one instance and remembers nothing about window geometry.
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
 
 [features]
 # Used by `tauri dev` to enable devtools on a release build.
 custom-protocol = ["tauri/custom-protocol"]
+
+# Smaller binaries, which matters for something people download over a slow connection.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

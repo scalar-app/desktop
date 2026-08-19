@@ -26,6 +26,16 @@
     ],
     "category": "Productivity",
     "shortDescription": "An operating system for attention",
-    "longDescription": "Scalar connects email, calendar, school systems, tasks and files into one action layer. Self-hosted: this app talks to a Scalar server you run."
+    "longDescription": "Scalar connects email, calendar, school systems, tasks and files into one action layer. Self-hosted: this app talks to a Scalar server you run.",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "createUpdaterArtifacts": false
   }
 }
