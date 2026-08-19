@@ -14,9 +14,13 @@
 //! navigate the window away from the app with no way back.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest_cookie_store::CookieStoreMutex;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -50,12 +54,61 @@ pub struct ApiResponse {
     body: Vec<u8>,
 }
 
-/// The HTTP client, holding the cookie jar for the life of the app.
-pub struct Http(reqwest::Client);
+/// The name of the jar on disk. Kept in the app data directory, beside the window geometry.
+const COOKIE_FILE: &str = "cookies.json";
 
-fn build_client() -> Result<reqwest::Client, String> {
+/// The HTTP client and the cookie jar it draws on, for the life of the app.
+///
+/// The jar is written to disk because the alternative is signing in again every single launch.
+/// The window remembers its size and the app remembers its server, so a session that did not
+/// survive closing the window was the one thing that made the app feel disposable.
+///
+/// What that means in practice: the session cookie sits in a file in your own user profile,
+/// readable by anything running as you. That is the same bargain every browser makes with its
+/// cookie database, and the file holds one cookie for one self-hosted server. Deleting it, or
+/// signing out, is enough to end the session.
+pub struct Http {
+    client: reqwest::Client,
+    jar: Arc<CookieStoreMutex>,
+    path: PathBuf,
+}
+
+impl Http {
+    /// Writes the jar out. Called after a response that changed it, and again on the way out.
+    ///
+    /// Failure is deliberately quiet: not being able to save a cookie is a reason to sign in
+    /// again next time, not a reason to interrupt somebody mid task. Nothing is logged, because
+    /// the thing that failed to write is a credential.
+    fn persist(&self) {
+        let Ok(store) = self.jar.lock() else { return };
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let mut buffer = Vec::new();
+        if cookie_store::serde::json::save(&store, &mut buffer).is_err() {
+            return;
+        }
+        let _ = fs::write(&self.path, buffer);
+    }
+}
+
+/// Reads the jar back, or starts an empty one.
+///
+/// A file that will not parse is treated as no file at all. A corrupt jar should cost somebody a
+/// fresh sign in, never a start up failure.
+fn load_jar(path: &Path) -> cookie_store::CookieStore {
+    let Ok(file) = fs::File::open(path) else {
+        return cookie_store::CookieStore::default();
+    };
+    cookie_store::serde::json::load(BufReader::new(file)).unwrap_or_default()
+}
+
+fn build_client(jar: Arc<CookieStoreMutex>) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .cookie_store(true)
+        .cookie_provider(jar)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .user_agent(concat!("Scalar/", env!("CARGO_PKG_VERSION")))
@@ -75,7 +128,7 @@ async fn api_fetch(
     let method = reqwest::Method::from_bytes(request.method.as_bytes())
         .map_err(|_| format!("unsupported method: {}", request.method))?;
 
-    let mut outgoing = state.0.request(method, &request.url);
+    let mut outgoing = state.client.request(method, &request.url);
     for (name, value) in &request.headers {
         outgoing = outgoing.header(name, value);
     }
@@ -97,6 +150,12 @@ async fn api_fetch(
             headers.insert(name.as_str().to_ascii_lowercase(), text.to_string());
         }
     }
+    // Signing in and signing out are the only responses that change the jar, so this writes
+    // rarely rather than on every request.
+    if headers.contains_key("set-cookie") {
+        state.persist();
+    }
+
     let body = response
         .bytes()
         .await
@@ -302,7 +361,19 @@ pub fn run() {
 
     builder
         .setup(|app| {
-            app.manage(Arc::new(Http(build_client()?)));
+            // Beside the window geometry, in the directory the platform gives this app for its
+            // own data rather than anywhere shared.
+            let path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("no app data directory: {error}"))?
+                .join(COOKIE_FILE);
+            let jar = Arc::new(CookieStoreMutex::new(load_jar(&path)));
+            app.manage(Arc::new(Http {
+                client: build_client(jar.clone())?,
+                jar,
+                path,
+            }));
 
             #[cfg(desktop)]
             {
@@ -360,13 +431,24 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![api_fetch])
-        .run(tauri::generate_context!())
-        .expect("error while running Scalar");
+        .build(tauri::generate_context!())
+        .expect("error while building Scalar")
+        .run(|app, event| {
+            // Signing in already saves the jar. This covers the rest: cookies the server rotated
+            // or expired during the session, which would otherwise be lost on the way out.
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(http) = app.try_state::<Arc<Http>>() {
+                    http.persist();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_client, is_internal, CONNECT_TIMEOUT};
+    use super::{build_client, is_internal, load_jar, Http, CONNECT_TIMEOUT};
+    use reqwest_cookie_store::CookieStoreMutex;
+    use std::sync::Arc;
     use tauri::Url;
 
     fn url(text: &str) -> Url {
@@ -401,7 +483,8 @@ mod tests {
     /// turns into a string, which the shim rethrows so the web app shows its usual failure.
     #[tokio::test]
     async fn a_server_that_is_not_there_fails_rather_than_hanging() {
-        let client = build_client().expect("client should build");
+        let jar = Arc::new(CookieStoreMutex::new(cookie_store::CookieStore::default()));
+        let client = build_client(jar).expect("client should build");
 
         let started = std::time::Instant::now();
         // Port 1 on loopback: nothing listens there, so the connection is refused outright.
@@ -415,5 +498,133 @@ mod tests {
             started.elapsed() < CONNECT_TIMEOUT,
             "a refused connection should fail immediately, not wait out the connect timeout",
         );
+    }
+
+    /// The whole point of the jar: a session outlives the process that created it.
+    #[test]
+    fn a_session_survives_being_written_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("scalar-jar-{}", std::process::id()));
+        let path = dir.join("cookies.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let url = Url::parse("http://localhost:4000/").expect("url should parse");
+        let store = {
+            let mut store = cookie_store::CookieStore::default();
+            store
+                .parse(
+                    "scalar_session=abc123; Path=/; Expires=Wed, 01 Jan 2098 00:00:00 GMT",
+                    &url,
+                )
+                .expect("cookie should parse");
+            store
+        };
+
+        let http = Http {
+            client: build_client(Arc::new(CookieStoreMutex::new(
+                cookie_store::CookieStore::default(),
+            )))
+            .expect("client should build"),
+            jar: Arc::new(CookieStoreMutex::new(store)),
+            path: path.clone(),
+        };
+        http.persist();
+        assert!(path.exists(), "the jar should have been written");
+
+        let reloaded = load_jar(&path);
+        let cookie = reloaded
+            .get("localhost", "/", "scalar_session")
+            .expect("the session cookie should come back");
+        assert_eq!(cookie.value(), "abc123");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Proves the feature end to end against a real Scalar server: sign in with one client,
+    /// write the jar, build a second client from what was written, and still be signed in.
+    ///
+    /// Ignored by default because it needs a server. Run it with a Scalar API on port 4000:
+    ///     cargo test --lib -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs a Scalar API running on http://localhost:4000"]
+    async fn a_session_outlives_the_process_that_signed_in() {
+        let dir = std::env::temp_dir().join(format!("scalar-live-jar-{}", std::process::id()));
+        let path = dir.join("cookies.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let jar = Arc::new(CookieStoreMutex::new(cookie_store::CookieStore::default()));
+        let first = Http {
+            client: build_client(jar.clone()).expect("client should build"),
+            jar,
+            path: path.clone(),
+        };
+
+        // Development mode hands the link back, which is the only way in while email delivery
+        // does not exist.
+        let requested: serde_json::Value = first
+            .client
+            .post("http://localhost:4000/api/v1/auth/magic-link")
+            .json(&serde_json::json!({ "email": "jar-test@example.com" }))
+            .send()
+            .await
+            .expect("the API should answer")
+            .json()
+            .await
+            .expect("the response should be JSON");
+        // The link the API returns points at the browser app it is configured for, not at the
+        // API itself. Only the token matters, which is the same reason the web app carries it to
+        // its own verify route rather than following this URL.
+        let link = requested["devLink"]
+            .as_str()
+            .expect("the API must be in development mode for this test");
+        let (_, token) = link
+            .split_once("token=")
+            .expect("the link should carry a token");
+
+        let verified = first
+            .client
+            .get(format!(
+                "http://localhost:4000/api/v1/auth/magic-link/verify?token={token}"
+            ))
+            .send()
+            .await
+            .expect("verify should answer");
+        assert_eq!(
+            verified.status(),
+            200,
+            "the sign in link should be accepted"
+        );
+
+        first.persist();
+        assert!(path.exists(), "signing in should have written the jar");
+
+        // A brand new client, exactly as the next launch of the app builds one.
+        let reloaded = Arc::new(CookieStoreMutex::new(load_jar(&path)));
+        let second = build_client(reloaded).expect("client should build");
+        let me = second
+            .get("http://localhost:4000/api/v1/me")
+            .send()
+            .await
+            .expect("me should answer");
+
+        assert_eq!(
+            me.status(),
+            200,
+            "the restored session should still be signed in"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A jar that will not parse must cost a fresh sign in, never a failure to start.
+    #[test]
+    fn a_corrupt_jar_is_treated_as_an_empty_one() {
+        let dir = std::env::temp_dir().join(format!("scalar-bad-jar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
+        let path = dir.join("cookies.json");
+        std::fs::write(&path, b"this is not json").expect("file should be writable");
+
+        assert_eq!(load_jar(&path).iter_any().count(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

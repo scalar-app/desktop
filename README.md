@@ -24,6 +24,9 @@ The rest is what a window needs to be an application rather than a page:
 - **A menu.** A webview has no editing commands of its own, and on macOS that means copy, paste and select all genuinely do nothing without an Edit menu carrying the standard roles. Zoom in, out and actual size are there for the same reason.
 - **The window is remembered.** Size and position are restored, rather than reopening at the same default size every launch.
 - **One instance.** Launching again focuses the window you already have instead of opening a second copy on the same session.
+- **The session is remembered.** The cookie jar is written to the app data directory, so closing the app does not sign you out. Without that the window remembered its size and the app remembered its server, and the one thing it forgot was you.
+
+Keeping the session on disk means the cookie sits in a file in your own user profile, readable by anything running as you. That is the same bargain a browser makes with its cookie database, and the file holds one cookie for one self-hosted server. Signing out clears it, and deleting the file ends the session.
 
 ## Remote content, and why the CSP stays narrow
 
@@ -116,6 +119,7 @@ Verified on Windows, with the MSVC toolchain and the full `crate-type` including
 - The release binary runs. Its menus were read back from the running window: Edit carries Undo, Redo, Cut, Copy, Paste and Select All with the conventional shortcuts, and View carries Zoom In, Zoom Out and Actual Size.
 - Window geometry survives a restart: resized and moved, closed with a real close message, reopened at the same size and position.
 - A second launch focuses the existing window rather than starting another copy.
+- A session survives the process that created it. An ignored test signs in against a real API, writes the jar, builds a fresh client from what was written, and gets a 200 from `/me`. Run it with a server on port 4000: `cargo test --lib -- --ignored`.
 
 Not verified, and worth stating plainly rather than implying otherwise:
 
