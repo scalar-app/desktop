@@ -237,6 +237,88 @@ const BOOTSTRAP: &str = r#"
 })();
 "#;
 
+/// How tall the app draws its own title bar, handed to CSS as `--sc-titlebar`.
+///
+/// One number, declared here because the shell is what decides there is a title bar at all. The
+/// web app reads the variable rather than repeating the value.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const TITLEBAR_HEIGHT: &str = "36px";
+
+#[cfg(target_os = "macos")]
+const PLATFORM: &str = "macos";
+#[cfg(target_os = "windows")]
+const PLATFORM: &str = "windows";
+
+/// Tells the interface which window it is in, and hands it the three buttons.
+///
+/// The system title bar is gone: hidden behind the traffic lights on macOS, and absent entirely on
+/// Windows and Linux. What replaces it is drawn by the app, so it needs to know the platform (the
+/// controls belong on the right on Windows and are already on the left on macOS) and it needs a way
+/// to actually minimize, maximize and close.
+///
+/// The custom property is set here rather than in React because it has to be right on the first
+/// frame. A bar that appears after hydration moves the whole app down while somebody is looking at
+/// it.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn chrome_script() -> String {
+    format!(
+        r#"
+(() => {{
+  const invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
+  if (!invoke) return;
+
+  window.__SCALAR_PLATFORM__ = '{PLATFORM}';
+  window.__SCALAR_WINDOW__ = {{
+    minimize: () => invoke('window_minimize'),
+    toggleMaximize: () => invoke('window_toggle_maximize'),
+    close: () => invoke('window_close'),
+    isMaximized: () => invoke('window_is_maximized'),
+  }};
+
+  const reserve = () => {{
+    document.documentElement.style.setProperty('--sc-titlebar', '{TITLEBAR_HEIGHT}');
+  }};
+  if (document.documentElement) reserve();
+  else document.addEventListener('DOMContentLoaded', reserve, {{ once: true }});
+}})();
+"#
+    )
+}
+
+/// The buttons a window has when it draws its own title bar.
+#[cfg(desktop)]
+#[tauri::command]
+fn window_minimize(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.minimize().map_err(|error| error.to_string())
+}
+
+/// Returns the state it left the window in, so the button can show the right icon without asking.
+#[cfg(desktop)]
+#[tauri::command]
+fn window_toggle_maximize(window: tauri::WebviewWindow) -> Result<bool, String> {
+    let maximized = window.is_maximized().map_err(|error| error.to_string())?;
+    if maximized {
+        window.unmaximize().map_err(|error| error.to_string())?;
+    } else {
+        window.maximize().map_err(|error| error.to_string())?;
+    }
+    Ok(!maximized)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn window_close(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|error| error.to_string())
+}
+
+/// The operating system can maximize a window without the buttons being involved, by a snap or a
+/// double click on the drag region, so the interface has to be able to ask.
+#[cfg(desktop)]
+#[tauri::command]
+fn window_is_maximized(window: tauri::WebviewWindow) -> Result<bool, String> {
+    window.is_maximized().map_err(|error| error.to_string())
+}
+
 /// Whether a navigation is the app itself rather than somebody's link.
 ///
 /// The bundled interface is served from `tauri://localhost`, and on Windows from
@@ -257,7 +339,7 @@ fn is_internal(url: &tauri::Url) -> bool {
 /// A webview provides no editing commands of its own. On macOS that is not a rough edge but a
 /// blocker: without an Edit menu carrying the standard roles, the system shortcuts for copy, paste
 /// and select all do nothing at all. Zoom is here for the same reason.
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "windows")))]
 fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
@@ -319,7 +401,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
 }
 
 /// Steps the webview zoom, clamped so it cannot be driven to something unreadable.
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "windows")))]
 fn apply_zoom(window: &tauri::WebviewWindow, change: f64, reset: bool) {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -348,7 +430,20 @@ pub fn run() {
     // runs one copy of an app.
     #[cfg(desktop)]
     let builder = builder
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            // Geometry only. The plugin's default flags include DECORATIONS, and it applies them
+            // itself when a window is created, which put the system title bar back over the one the
+            // app draws no matter what the builder asked for. Whether this window has decorations
+            // is the build's decision, not a preference to remember between launches.
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                        | tauri_plugin_window_state::StateFlags::FULLSCREEN,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // Launching again should bring the window you already have to the front rather than
             // opening a second one with the same session.
@@ -375,7 +470,14 @@ pub fn run() {
                 path,
             }));
 
-            #[cfg(desktop)]
+            // Everywhere but Windows. On macOS the menu lives in the system menu bar, where it is
+            // the only way copy and paste work at all in a webview, and Linux keeps its system
+            // decorations so a menu bar sits where one is expected. On Windows a menu set on the
+            // window is a Win32 menu bar, and with the decorations off it draws in the wrong
+            // place, behind the webview, unclickable until Alt is pressed (tauri-apps/tauri#12074).
+            // A broken menu bar is worse than none, and WebView2 handles editing and zoom keys
+            // itself, so nothing is lost by leaving it off there.
+            #[cfg(not(target_os = "windows"))]
             {
                 let menu = build_menu(app.handle())?;
                 app.set_menu(menu)?;
@@ -394,9 +496,18 @@ pub fn run() {
 
             // Built here rather than declared in the config, because an initialization script has
             // to be attached to the window and it has to run before the app's own scripts.
-            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            let boot = format!("{BOOTSTRAP}{}", chrome_script());
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            let boot = BOOTSTRAP.to_string();
+
+            // Not `/`. In the browser build that path is a server redirect to Today, and a static
+            // export has no server to perform it: `/` exports as an error document, so opening it
+            // showed an empty window. The app starts on the screen the redirect pointed at, and
+            // the shell sends anyone signed out to the sign in screen from there.
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("today/".into()))
                 .title("Scalar")
-                .initialization_script(BOOTSTRAP)
+                .initialization_script(&boot)
                 .on_navigation(|url| {
                     if is_internal(url) {
                         return true;
@@ -417,20 +528,66 @@ pub fn run() {
                 .min_inner_size(380.0, 560.0)
                 .resizable(true);
 
+            // The system title bar goes, and the app draws its own. On macOS the traffic lights
+            // stay where every Mac user expects them and the bar slides behind them; elsewhere the
+            // decorations go entirely and the interface supplies the three buttons.
+            #[cfg(all(desktop, target_os = "macos"))]
+            let window = window
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+
+            // Windows draws its own chrome. `shadow` is what gives an undecorated window its drop
+            // shadow back, and on Windows 11 its rounded corners with it.
+            #[cfg(all(desktop, target_os = "windows"))]
+            let window = window.decorations(false).shadow(true);
+
+            // Linux keeps the system decorations. Undecorated windows are the least consistent
+            // there across desktop environments, and a window that cannot be moved or resized on
+            // somebody's compositor is a worse outcome than a title bar that does not match.
+
             let window = window.build()?;
+
+            // Only in a debug build, and only because a webview with no address bar gives you
+            // nothing at all when a script fails.
+            #[cfg(all(desktop, debug_assertions))]
+            window.open_devtools();
 
             // A window created here rather than declared in the config is not restored by the
             // plugin on its own, so the saved geometry is applied explicitly.
             #[cfg(desktop)]
             {
                 use tauri_plugin_window_state::{StateFlags, WindowExt};
-                let _ = window.restore_state(StateFlags::all());
+                // Geometry, not chrome. `all()` includes DECORATIONS, which restores whatever the
+                // window had last time and quietly puts the system title bar back over the one the
+                // app draws. Whether there are decorations is this build's decision, not a
+                // preference to remember.
+                let _ = window.restore_state(
+                    StateFlags::SIZE
+                        | StateFlags::POSITION
+                        | StateFlags::MAXIMIZED
+                        | StateFlags::FULLSCREEN,
+                );
             }
             let _ = &window;
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![api_fetch])
+        .invoke_handler({
+            #[cfg(desktop)]
+            {
+                tauri::generate_handler![
+                    api_fetch,
+                    window_minimize,
+                    window_toggle_maximize,
+                    window_close,
+                    window_is_maximized
+                ]
+            }
+            #[cfg(not(desktop))]
+            {
+                tauri::generate_handler![api_fetch]
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building Scalar")
         .run(|app, event| {
